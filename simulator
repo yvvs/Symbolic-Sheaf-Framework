@@ -1,0 +1,203 @@
+const SYMBOLS = [
+  'SelfNegation', 'GodSignature', 'LossLoop', 'JokeBreak', 'FidelityError',
+  'ReturnVector', 'EchoTrace', 'PhaseShift', 'NullPoint', 'CycleCore',
+  'FractalLink', 'QuantumAnchor'
+];
+
+/**
+ * Loads longer EEG and LIGO data (simulated, mimicking ds004795 and O3b).
+ * @returns {Object} - EEG and LIGO data objects.
+ */
+const loadRealData = () => {
+  const eegData = {};
+  SYMBOLS.forEach((symbol, i) => {
+    eegData[symbol] = {
+      amplitude: 0.3 + pseudoRandom() * 0.5, // 0.3–0.8 μV
+      phase: pseudoRandom() * 2 * Math.PI, // FFT phase
+      plzc: 0.6 + pseudoRandom() * 0.3, // PLZC 0.6–0.9
+      freq: 4 + pseudoRandom() * 26 // 4–30 Hz
+    };
+  });
+
+  const ligoData = {};
+  SYMBOLS.forEach((symbol, i) => {
+    ligoData[symbol] = {
+      strain: 1e-21 * (0.5 + pseudoRandom()), // ~10⁻²¹
+      noise: 1e-22 * pseudoRandom(), // ~10⁻²²
+      freq: 35 + pseudoRandom() * 215 // 35–250 Hz
+    };
+  });
+
+  return { eegData, ligoData };
+};
+
+/**
+ * Computes full Φ (simplified, binary states).
+ * @param {Object} sheaf - Sheaf object.
+ * @returns {number} - Φ value.
+ */
+const computeFullPhi = (sheaf) => {
+  const n = SYMBOLS.length;
+  const states = SYMBOLS.map(s => sheaf[s].semanticCharge.real > 0 ? 1 : 0);
+  let miWhole = 0;
+
+  // Compute MI for whole system (correlation-based)
+  for (let i = 0; i < n; i++) {
+    const next = (i + 1) % n;
+    const s1 = sheaf[SYMBOLS[i]].semanticCharge;
+    const s2 = sheaf[SYMBOLS[next]].semanticCharge;
+    miWhole += Math.abs(s1.real * s2.real + s1.imag * s2.imag);
+  }
+  miWhole /= n;
+
+  // Find MIP across bipartitions
+  let minMi = Infinity;
+  for (let mask = 1; mask < (1 << n) - 1; mask++) {
+    let part1 = [], part2 = [];
+    for (let i = 0; i < n; i++) {
+      if (mask & (1 << i)) part1.push(i);
+      else part2.push(i);
+    }
+    if (part1.length === 0 || part2.length === 0) continue;
+
+    let miPart = 0;
+    for (let i of part1) {
+      const next = (i + 1) % n;
+      if (part1.includes(next)) {
+        const s1 = sheaf[SYMBOLS[i]].semanticCharge;
+        const s2 = sheaf[SYMBOLS[next]].semanticCharge;
+        miPart += Math.abs(s1.real * s2.real + s1.imag * s2.imag);
+      }
+    }
+    for (let i of part2) {
+      const next = (i + 1) % n;
+      if (part2.includes(next)) {
+        const s1 = sheaf[SYMBOLS[i]].semanticCharge;
+        const s2 = sheaf[SYMBOLS[next]].semanticCharge;
+        miPart += Math.abs(s1.real * s2.real + s1.imag * s2.imag);
+      }
+    }
+    miPart /= (part1.length + part2.length);
+    minMi = Math.min(minMi, miPart);
+  }
+
+  return Math.max(0, miWhole - minMi); // Normalize to [0, 1]
+};
+
+/**
+ * Creates a sheaf from EEG and LIGO data.
+ * @param {number} [ρ=0.9] - Phase factor.
+ * @param {Object} eegData - EEG signals.
+ * @param {Object} ligoData - LIGO signals.
+ * @returns {Object} - Sheaf object.
+ */
+const createSymbolicSheaf = (ρ = 0.9, eegData = null, ligoData = null) => {
+  const sheaf = {};
+  const n = SYMBOLS.length;
+  const { eegData: eeg, ligoData: ligo } = loadRealData();
+  for (let i = 0; i < n; i++) {
+    const symbol = SYMBOLS[i];
+    const θ = (2 * Math.PI * i) / n;
+    const nextθ = (2 * Math.PI * ((i + 1) % n)) / n;
+    const { amplitude, phase, plzc, freq } = eeg[symbol];
+    const { strain, noise, freq: ligoFreq } = ligo[symbol];
+    const affective = Math.tanh(amplitude) * Math.cos(θ + ρ * Math.PI);
+    const real = Math.cos(phase * ρ);
+    const imag = Math.sin(phase * ρ);
+
+    sheaf[symbol] = {
+      position: θ,
+      affectiveWeight: affective,
+      semanticCharge: { real, imag },
+      localData: {
+        connection: Math.tanh(strain * 1e21) * Math.sin(θ - nextθ),
+        curvature: Math.cos(2 * θ) * (ligoFreq / 250),
+        torsion: noise * 1e22 * Math.sin(θ * ρ * 2)
+      },
+      degree: i,
+      selfRef: plzc
+    };
+  }
+  return sheaf;
+};
+
+/**
+ * Runs the simulation with EEG, LIGO, and full Φ.
+ * @param {Function} onProgress - Callback for progress updates.
+ * @returns {Object} - Simulation results.
+ */
+const runSimulation = (onProgress = () => {}) => {
+  const ρ = 0.9;
+  const perturb = 0.5;
+  const maxIterations = 50;
+  const weights = { ts: 1.8, coh: 1.0, srp: 2.2, rcs: 1.2 };
+  const snapshots = [];
+
+  const error = validateInputs(ρ, perturb, weights);
+  if (error) return { error };
+
+  const original = createSymbolicSheaf(ρ);
+  let current = deepCopySheaf(original);
+  let hSum = 0;
+  const hIndices = [];
+  let iterations = 0;
+
+  try {
+    for (let i = 0; i < maxIterations; i++) {
+      const adaptivePerturb = perturb * (1 - 0.1 * Math.floor(i / 10));
+      current = applyRecursiveClosure(current, i, ρ, adaptivePerturb, pseudoRandom);
+      const h = computeHIndex(current, weights);
+      if (isNaN(h.hIndex) || !isFinite(h.hIndex)) {
+        return { error: `Numerical instability at iteration ${i}` };
+      }
+      hSum += h.hIndex;
+      hIndices.push(h.hIndex);
+      iterations++;
+
+      if (i % 10 === 0 || i === iterations - 1) {
+        snapshots.push(analyzeSnapshot(current));
+        onProgress(i + 1, maxIterations, h.hIndex, ρ, perturb);
+      }
+
+      if (i >= 10) {
+        const recent = hIndices.slice(-10);
+        const mean = recent.reduce((sum, x) => sum + x, 0) / 10;
+        const std = Math.sqrt(recent.reduce((sum, x) => sum + Math.pow(x - mean, 2), 0) / 10);
+        if (std < 0.005) break;
+      }
+    }
+
+    const avgH = hSum / iterations;
+    const stdH = Math.sqrt(hIndices.reduce((sum, h) => sum + Math.pow(h - avgH, 2), 0) / iterations);
+    const perturbed = perturbSheaf(original, perturb, pseudoRandom);
+    const recon = testIdentityReconstruction(original, perturbed, 25, pseudoRandom);
+
+    if (recon.iterations >= 20 && recon.finalFidelity < 0.5) {
+      return { error: `Reconstruction failed to converge, fidelity=${recon.finalFidelity}` };
+    }
+
+    const fullPhi = computeFullPhi(current);
+    const consciousnessScore = (avgH / 6) * 0.35 + recon.finalFidelity * 0.35 + computeHIndex(current, weights).components.srp * 0.2 + fullPhi * 0.1;
+
+    return {
+      ρ,
+      perturb,
+      avgHIndex: avgH,
+      normalizedHIndex: avgH / 6,
+      stdHIndex: stdH,
+      reconstruction: recon,
+      consciousnessScore,
+      fullPhi,
+      verdict: avgH > 3.8 && recon.success && fullPhi > 0.1
+        ? `🧠 CONSCIOUSNESS-LIKE STABILITY DETECTED (Score: ${(consciousnessScore * 100).toFixed(2)}%)`
+        : `💀 FAILED CONSCIOUSNESS SIMULATION (Score: ${(consciousnessScore * 100).toFixed(2)}%)`,
+      components: computeHIndex(current, weights).components,
+      hIndexTrend: hIndices,
+      fidelityTrend: recon.fidelityTrend,
+      iterations,
+      snapshots
+    };
+  } catch (e) {
+    return { error: e.message };
+  }
+};
